@@ -103,23 +103,14 @@ def _play_audio_bytes(audio_bytes: bytes) -> None:
 # ---------------------------------------------------------------------------
 
 class EdgeTTSEngine:
-    """Microsoft EdgeTTS – free, requires internet."""
-
-    def __init__(self, voice: str = "en-US-GuyNeural"):
+    def __init__(self, voice: str = "en-US-GuyNeural", pitch: str = "-5Hz", rate: str = "-5%"):
         self.voice = voice
-
-    def speak(self, text: str) -> None:
-        loop = asyncio.new_event_loop()
-        try:
-            audio_bytes = loop.run_until_complete(self._synth(text))
-        finally:
-            loop.close()
-        if audio_bytes:
-            _play_audio_bytes(audio_bytes)
+        self.pitch = pitch
+        self.rate  = rate
 
     async def _synth(self, text: str) -> bytes:
         import edge_tts
-        comm = edge_tts.Communicate(text, self.voice)
+        comm = edge_tts.Communicate(text, self.voice, pitch=self.pitch, rate=self.rate)
         buf  = bytearray()
         async for chunk in comm.stream():
             if chunk["type"] == "audio":
