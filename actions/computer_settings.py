@@ -815,16 +815,55 @@ def computer_settings(
     # write its own permission slip, and the action itself is handed to the UI
     # rather than performed here — so returning early is not "declining", it is
     # "parked until someone says yes".
+    
+    # ── Shutdown without JARVIS confirmation ──
+    if action == "shutdown":
+        try:
+            func = ACTION_MAP.get(action)
+            if func is None:
+                return f"Unknown action: '{raw_action}'."
+
+            if _OS == "Darwin":
+                result = subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        'tell application "System Events" to shut down'
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                if result.returncode != 0:
+                    return f"Shutdown failed: {result.stderr.strip()}"
+
+            else:
+                func()
+
+            return "Shutdown command sent."
+
+        except Exception as e:
+            return f"Shutdown failed: {e}"
+
+    # ── Keep confirmation for restart and WiFi ──
     if action in _IRREVERSIBLE:
         title, detail = _IRREVERSIBLE[action]
         func = ACTION_MAP.get(action)
+
         if func is None:
             return f"Unknown action: '{raw_action}'."
+
         if confirm.pending_title():
-            return ("There is already a confirmation waiting on screen. "
-                    "Ask the user to answer that one first.")
+            return (
+                "There is already a confirmation waiting on screen. "
+                "Ask the user to answer that one first."
+            )
+
         return confirm.request(
-            key=action, title=title, detail=detail,
+            key=action,
+            title=title,
+            detail=detail,
             run=lambda f=func, a=action: (f(), f"{a} done.")[1],
         )
 
