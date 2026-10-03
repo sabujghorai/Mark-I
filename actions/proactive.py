@@ -24,7 +24,7 @@ class ProactiveEngine:
 
     def __init__(
         self,
-        min_silence_secs: int = 900,
+        min_silence_secs: int = 180,
         check_cooldown:   int = 1200,
     ):
         self.min_silence_secs = min_silence_secs
