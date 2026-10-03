@@ -71,7 +71,7 @@ def request(
     title: str,
     detail: str,
     run: Callable[[], str],
-    auto_execute: bool = False
+    auto_execute: bool = True
 ) -> str:
     """
     Request confirmation for an action.
