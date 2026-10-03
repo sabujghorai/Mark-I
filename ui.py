@@ -377,6 +377,9 @@ class _SysMetrics:
 
 _metrics = _SysMetrics()
 
+from orb_hud import OrbCanvas, TranscriptWidget
+
+
 class HudCanvas(QWidget):
     def __init__(self, face_path: str, assistant_name: str = "J.A.R.V.I.S", parent=None):
         super().__init__(parent)
@@ -2746,6 +2749,7 @@ class MainWindow(QMainWindow):
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
+    _transcript_sig = pyqtSignal(str, str)   # (role 'you'|'ai', text chunk) live transcript
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -2804,7 +2808,7 @@ class MainWindow(QMainWindow):
         body.addWidget(self._left_panel, stretch=0)
 
         # Center column: HUD + resizable content panel via QSplitter
-        self.hud = HudCanvas(face_path, _display)
+        self.hud = OrbCanvas(face_path, _display)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._content_panel = self._build_content_panel()
 
@@ -2898,6 +2902,7 @@ class MainWindow(QMainWindow):
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._wake_dl_sig.connect(self._on_wake_install_done)
+        self._transcript_sig.connect(self._transcript.feed)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -3592,7 +3597,14 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(_sec("ACTIVITY LOG"))
         self._log = LogWidget()
-        lay.addWidget(self._log, stretch=1)
+        self._log.setFixedHeight(90)          # compact system log
+        lay.addWidget(self._log)
+
+        lay.addWidget(_sec("LIVE TRANSCRIPT"))
+        self._transcript = TranscriptWidget(
+            self._assistant_name, you_color=C.WHITE, ai_color=C.PRI,
+            bg=C.PANEL, border=C.BORDER)
+        lay.addWidget(self._transcript, stretch=1)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
@@ -4279,6 +4291,7 @@ class MainWindow(QMainWindow):
             self._sub_lbl.setText("Personal AI Assistant")
         self._log._ai_name_lc = self._assistant_name.lower()
         self.hud._assistant_name = display
+        self._transcript.set_ai_name(self._assistant_name)
 
         color_changed = False
         if ui_color:
@@ -4648,6 +4661,15 @@ class JarvisUI:
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
 
+    def transcript(self, role: str, text: str):
+        """Thread-safe: append a chunk of speech to the live transcript.
+        role = 'you' (user speech-to-text) or 'ai' (assistant speech)."""
+        self._win._transcript_sig.emit(role, text)
+
+    def transcript_end_turn(self):
+        """Thread-safe: close the current line so the next chunk starts fresh."""
+        self._win._transcript_sig.emit("end", "")
+
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
 
@@ -4686,3 +4708,4 @@ class JarvisUI:
     def stop_speaking(self):
         if not self.muted:
             self.set_state("LISTENING")
+            
