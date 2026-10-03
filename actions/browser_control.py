@@ -38,6 +38,80 @@ def _normalize_url(url: str) -> str:
     return "https://" + url
 
 
+def _native_smooth_scroll(browser: str | None, direction: str, amount: int) -> str:
+    """Naturally eased scrolling in the active macOS browser tab."""
+    if platform.system() != "Darwin":
+        return "Smooth scrolling is supported on macOS only."
+
+    direction = direction.lower().strip()
+    if direction not in ("up", "down"):
+        return "Please specify scroll up or scroll down."
+
+    amount = max(50, min(abs(int(amount)), 350))
+    distance = amount if direction == "down" else -amount
+    name = (browser or "chrome").lower()
+
+    # Moderate speed with a gradual start and finish.
+    js = f"""(()=>{{
+        const distance = {distance};
+        const start = window.scrollY;
+        const duration = Math.max(650, Math.min(1100, Math.abs(distance) * 0.55));
+        const startTime = performance.now();
+
+        function animate(now) {{
+            const progress = Math.min((now - startTime) / duration, 1);
+
+            // Smooth ease-in/ease-out curve.
+            const eased = progress * progress * (3 - 2 * progress);
+
+            window.scrollTo(0, start + distance * eased);
+
+            if (progress < 1) {{
+                requestAnimationFrame(animate);
+            }}
+        }}
+
+        requestAnimationFrame(animate);
+    }})()"""
+
+    if name in ("chrome", "google chrome"):
+        app = "Google Chrome"
+        script = f'''
+        tell application "Google Chrome"
+            if (count of windows) is 0 then return "No Chrome window is open."
+            activate
+            tell active tab of front window
+                execute javascript "{js}"
+            end tell
+        end tell
+        '''
+    elif name == "safari":
+        app = "Safari"
+        script = f'''
+        tell application "Safari"
+            if (count of windows) is 0 then return "No Safari window is open."
+            activate
+            do JavaScript "{js}" in current tab of front window
+        end tell
+        '''
+    else:
+        return f"Smooth scrolling is not configured for {name}."
+
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            return result.stderr.strip() or f"Could not scroll {app}."
+        return f"Smoothly scrolled {direction} in {app}."
+    except Exception as e:
+        return f"Scrolling failed: {e}"
+
+
+
 def _user_agent() -> str:
     if _OS == "Windows":
         return (
