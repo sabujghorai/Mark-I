@@ -2750,6 +2750,7 @@ class MainWindow(QMainWindow):
     _confirm_hide_sig = pyqtSignal()
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
     _transcript_sig = pyqtSignal(str, str)   # (role 'you'|'ai', text chunk) live transcript
+    _transcript_live_sig = pyqtSignal(str, str, bool)   # (role, partial text, final) in-place live captions
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -2903,6 +2904,7 @@ class MainWindow(QMainWindow):
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._wake_dl_sig.connect(self._on_wake_install_done)
         self._transcript_sig.connect(self._transcript.feed)
+        self._transcript_live_sig.connect(self._transcript.live)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -4666,6 +4668,10 @@ class JarvisUI:
         role = 'you' (user speech-to-text) or 'ai' (assistant speech)."""
         self._win._transcript_sig.emit(role, text)
 
+    def transcript_live(self, role: str, text: str, final: bool = False):
+        """Thread-safe: in-place streaming caption (partial text rewrites itself until final)."""
+        self._win._transcript_live_sig.emit(role, text, bool(final))
+
     def transcript_end_turn(self):
         """Thread-safe: close the current line so the next chunk starts fresh."""
         self._win._transcript_sig.emit("end", "")
@@ -4708,4 +4714,3 @@ class JarvisUI:
     def stop_speaking(self):
         if not self.muted:
             self.set_state("LISTENING")
-            

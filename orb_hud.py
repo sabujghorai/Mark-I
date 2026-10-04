@@ -202,11 +202,54 @@ class TranscriptWidget(QTextEdit):
         self._ai_name = ai_name.upper()
         self._colors = {"you": QColor(you_color), "ai": QColor(ai_color)}
         self._role: str | None = None
+        self._live_start: int | None = None     # start of the in-progress (partial) text
+        self._live_cap = False
 
     def set_ai_name(self, name: str) -> None:
         self._ai_name = name.upper()
 
+    def _open_role(self, cur, role: str) -> None:
+        """Start a new labelled line if the speaker changed."""
+        if role != self._role:
+            if self._role is not None:
+                cur.insertBlock()
+            self._role = role
+            lab = QTextCharFormat()
+            lab.setForeground(self._colors[role])
+            lab.setFontWeight(QFont.Weight.Bold)
+            cur.insertText(("YOU" if role == "you" else self._ai_name) + "  ", lab)
+
+    def live(self, role: str, text: str, final: bool) -> None:
+        """Streaming text that is rewritten in place until it is final."""
+        role = "you" if role == "you" else "ai"
+        text = (text or "").strip()
+        if not text:
+            if final:
+                self._live_start = None
+            return
+        cur = self.textCursor()
+        cur.movePosition(cur.MoveOperation.End)
+        if self._live_start is None or role != self._role:
+            self._live_cap = role != self._role        # capitalise only at the start of a line
+            self._open_role(cur, role)
+            self._live_start = cur.position()
+        else:
+            cur.setPosition(self._live_start)
+            cur.movePosition(cur.MoveOperation.End, cur.MoveMode.KeepAnchor)
+            cur.removeSelectedText()
+        if self._live_cap:
+            text = text[0].upper() + text[1:]
+        body = QTextCharFormat()
+        body.setForeground(self._colors[role])
+        body.setFontWeight(QFont.Weight.Normal)
+        cur.insertText(text + (" " if final else ""), body)
+        if final:
+            self._live_start = None
+        self.setTextCursor(cur)
+        self.ensureCursorVisible()
+
     def feed(self, role: str, text: str) -> None:
+        self._live_start = None
         if role == "end":
             self.end_turn()
             return
@@ -234,4 +277,3 @@ class TranscriptWidget(QTextEdit):
     def end_turn(self) -> None:
         if self._role is not None:
             self._role = "end"       # forces a new line for the next speaker
-            

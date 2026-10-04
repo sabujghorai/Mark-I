@@ -352,9 +352,30 @@ def _keep_context_of(exc: BaseException) -> bool:
 class JarvisLive:
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
+        self._live_got_text = False   # live captions produced text during the current user turn
+        # Offline streaming captions so YOUR words appear while you are still
+        # speaking (Gemini's own input transcript arrives late). Safe fallback:
+        # if it can't start, Gemini's transcript is used instead.
+        try:
+            from live_stt import LiveSTT
+            self._live_stt = LiveSTT(
+                BASE_DIR,
+                on_text=self._on_live_caption,
+                logger=lambda msg: self.ui.write_log(f"SYS: {msg}"),
+                sample_rate=SEND_SAMPLE_RATE,
+                api_key=_get_api_key,
+            )
+        except Exception as _e:
+            print(f"[LiveSTT] disabled: {_e}")
+            self._live_stt = None
         self._asst_name     = "JARVI    S"   # updated each session from config
         self.session              = None
         self.audio_in_queue       = None
+        # Transcript/voice sync: AI text arrives before its audio is played, so
+        # text is held back until playback reaches the audio received with it.
+        self._aud_in      = 0      # bytes of AI audio queued for playback
+        self._aud_out     = 0      # bytes of AI audio actually played
+        self._pending_ai: list = []   # [(release_at_bytes, text | None)]  None = end of turn
         self.out_queue            = None
         self._loop                     = None
         self._is_speaking         = False
@@ -633,9 +654,27 @@ class JarvisLive:
         elif not self.ui.muted:
             self.ui.set_state("LISTENING")
 
+    def _on_live_caption(self, text: str, final: bool) -> None:
+        """Live English captions of the user's speech (worker thread)."""
+        if text:
+            self._live_got_text = True
+        self.ui.transcript_live("you", text, final)
+
+    def _flush_ai(self, force: bool = False) -> None:
+        """Show held-back AI transcript text whose audio has now been played."""
+        p = self._pending_ai
+        while p and (force or p[0][0] <= self._aud_out):
+            _, t = p.pop(0)
+            if t is None:
+                self.ui.transcript_end_turn()
+            else:
+                self.ui.transcript("ai", t)
+
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
+        self._pending_ai.clear()
+        self._aud_in = self._aud_out = 0
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -939,6 +978,8 @@ class JarvisLive:
                 jarvis_speaking = self._is_speaking
             if not jarvis_speaking and not self.ui.muted and not self._phone_active:
                 data = indata.tobytes()
+                if self._live_stt is not None:
+                    self._live_stt.feed(data)
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
                     {"data": data, "mime_type": "audio/pcm"}
@@ -1026,6 +1067,7 @@ class JarvisLive:
                             _SLICE = 2400
                             for _i in range(0, len(_audio_data), _SLICE):
                                 self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
+                            self._aud_in += len(_audio_data)
 
                     if response.server_content:
                         sc = response.server_content
@@ -1034,11 +1076,17 @@ class JarvisLive:
                             txt = _clean_transcript(sc.output_transcription.text)
                             if txt and txt != (out_buf[-1] if out_buf else ""):
                                 out_buf.append(txt)
+                                # held until the matching audio is actually played
+                                self._pending_ai.append((self._aud_in, txt + " "))
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
                                 in_buf.append(txt)
+                                if not self._live_got_text:
+                                    # fallback: live captions gave nothing this turn -> Gemini's (late) text
+                                    self._flush_ai(force=True)
+                                    self.ui.transcript("you", txt + " ")
                                 self._last_user_speech = time.monotonic()
 
                         if sc.turn_complete:
@@ -1051,11 +1099,13 @@ class JarvisLive:
                                 self._interrupted = False
                                 in_buf  = []
                                 out_buf = []
+                                self.ui.transcript_end_turn()
                                 continue
 
+                            self._live_got_text = False
                             full_in = " ".join(in_buf).strip()
                             if full_in:
-                                self.ui.write_log(f"You: {full_in}")
+                                # (already shown live in the transcript panel)
                                 self._session_log.append(f"User: {full_in}")
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
@@ -1067,7 +1117,7 @@ class JarvisLive:
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
-                                self.ui.write_log(f"{self._asst_name}: {full_out}")
+                                # (already shown live in the transcript panel)
                                 self._session_log.append(f"{self._asst_name}: {full_out}")
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
@@ -1076,6 +1126,7 @@ class JarvisLive:
                                         "ts": datetime.now().isoformat(),
                                     }))
                             out_buf = []
+                            self._pending_ai.append((self._aud_in, None))   # end of turn, after its audio
 
                             # Vision injection: model finished tool-response turn → now send the image
                             if self._pending_vision and self.session:
@@ -1168,6 +1219,7 @@ class JarvisLive:
                     ):
                         self.set_speaking(False)
                         self._turn_done_event.clear()
+                    self._flush_ai()
                     continue
 
                 self.set_speaking(True)
@@ -1191,6 +1243,8 @@ class JarvisLive:
 
                 try:
                     await asyncio.to_thread(stream.write, bytes(batch))
+                    self._aud_out += len(batch)
+                    self._flush_ai()
                 except (RuntimeError, asyncio.CancelledError):
                     break   # executor shutting down — exit cleanly
         except Exception as e:
