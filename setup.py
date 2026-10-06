@@ -23,7 +23,7 @@ def _run(label: str, args: list[str]) -> None:
 
 
 def main() -> None:
-    print(f"⚙  MARK LIII setup — detected OS: {OS or 'unknown'}")
+    print(f"⚙  MARK I setup — detected OS: {OS or 'unknown'}")
 
     # requirements.txt filters OS-specific extras by itself via pip markers.
     _run("Installing Python dependencies (OS-specific extras auto-filtered)…",
