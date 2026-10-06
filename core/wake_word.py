@@ -2,7 +2,7 @@
 Local wake-word and gesture detection for JARVIS.
 
 Wake triggers:
-    1. "Hey Jarvis"
+    1. "Hey Buddy"
     2. Double clap
     3. Finger snap
 
