@@ -1,4 +1,4 @@
-# ⚙️ MARK LIII (53)
+# ⚙️ MARK I (one)
 ### The Ultimate Cross-Platform Personal AI Assistant — By FatihMakes
 
 > 📺 **[Watch the full setup video on YouTube](https://www.youtube.com/@FatihMakes)**
