@@ -18,7 +18,7 @@ import wave
 import numpy as np
 
 CAPTION_MODEL = "gemini-flash-latest"   # same model name the app already uses elsewhere
-PARTIAL_EVERY = 2.0              # seconds between in-place updates while you speak
+PARTIAL_EVERY = 1.2              # seconds between in-place updates while you speak
 END_SILENCE   = 0.8              # seconds of quiet that finalises a sentence
 MAX_UTTERANCE = 25.0             # force-finalise very long sentences
 MIN_AUDIO     = 0.5              # don't decode anything shorter than this
