@@ -60,8 +60,8 @@ def _read_full_config() -> dict:
         return {}
 
 
-_DEFAULT_W, _DEFAULT_H = 980, 700
-_MIN_W,     _MIN_H     = 820, 580
+_DEFAULT_W, _DEFAULT_H = 1400, 900
+_MIN_W,     _MIN_H     = 1000, 650
 _LEFT_W  = 148
 _RIGHT_W = 340
 
@@ -2737,6 +2737,58 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+class _HudMicButton(QPushButton):
+    """Large circular microphone control used by the JARVIS HUD."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(82, 82)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Toggle microphone")
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx = self.width() / 2
+        cy = self.height() / 2
+        for r, a, width in ((39, 35, 1), (34, 85, 2), (29, 220, 2)):
+            p.setPen(QPen(qcol(C.PRI, a), width))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QRectF(cx-r, cy-r, r*2, r*2))
+        p.setPen(QPen(qcol(C.PRI, 255), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(cx-11, cy-20, 22, 32))
+        p.drawArc(QRectF(cx-17, cy-8, 34, 28), 180*16, 180*16)
+        p.drawLine(QPointF(cx, cy+20), QPointF(cx, cy+28))
+        p.drawLine(QPointF(cx-9, cy+28), QPointF(cx+9, cy+28))
+        p.end()
+
+
+class _HudInterruptButton(QPushButton):
+    """Small red interrupt/stop control."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(48, 48)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Interrupt JARVIS")
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx = self.width()/2
+        cy = self.height()/2
+        p.setPen(QPen(qcol(C.RED, 220), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(cx-16, cy-16, 32, 32))
+        p.drawEllipse(QRectF(cx-7, cy-7, 14, 14))
+        p.drawLine(QPointF(cx-21, cy), QPointF(cx-13, cy))
+        p.drawLine(QPointF(cx+13, cy), QPointF(cx+21, cy))
+        p.drawLine(QPointF(cx, cy-21), QPointF(cx, cy-13))
+        p.drawLine(QPointF(cx, cy+13), QPointF(cx, cy+21))
+        p.end()
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -2805,10 +2857,13 @@ class MainWindow(QMainWindow):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
 
+        # The old monitor/input sidebars are still constructed so every existing
+        # feature keeps its widgets and callbacks, but they are not placed in
+        # the visible layout.  The HUD below is now the whole main surface.
         self._left_panel = self._build_left_panel()
-        body.addWidget(self._left_panel, stretch=0)
+        self._left_panel.hide()
 
-        # Center column: HUD + resizable content panel via QSplitter
+        # Center column: HUD + the existing optional content panel via QSplitter
         self.hud = OrbCanvas(face_path, _display)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._content_panel = self._build_content_panel()
@@ -2867,13 +2922,20 @@ class MainWindow(QMainWindow):
         self._center_split.setStretchFactor(0, 3)
         self._center_split.setStretchFactor(1, 1)
         self._center_split.setCollapsible(0, False)
-        body.addWidget(self._center_split, stretch=5)
+        body.addWidget(self._center_split, stretch=1)
 
+        # Build the old right panel to preserve all command/file controls, but
+        # keep it out of the visible UI.  The log and transcript widgets are
+        # reparented into the new floating HUD so the existing signals keep
+        # working without changing main.py's UI API.
         self._right_panel = self._build_right_panel()
-        body.addWidget(self._right_panel, stretch=0)
+        self._right_panel.hide()
+        self._log.setParent(central)
+        self._transcript.setParent(central)
 
         root.addLayout(body, stretch=1)
-        root.addWidget(self._build_footer())
+
+        self._build_hud_overlay(central)
 
         # Quick-access drawer (floating overlay, built after central widget layout is done)
         self._quick_drawer = self._build_quick_drawer()
@@ -3377,14 +3439,15 @@ class MainWindow(QMainWindow):
                 (cw.height() - oh) // 2,
                 ow, oh,
             )
-        # Camera preview — bottom-right corner of the center/HUD area
+        # Camera preview — unobtrusive lower-right HUD overlay.
         pw = _CameraPreview._W
         ph = self._cam_preview.height() or _CameraPreview._H
         self._cam_preview.setGeometry(
-            cw.width() - _RIGHT_W - pw - 12,
+            cw.width() - pw - 24,
             cw.height() - ph - 28,
             pw, ph,
         )
+        self._position_hud_overlay()
         # Clipboard panel — bottom-center
         if hasattr(self, '_clipboard_panel') and self._clipboard_panel.isVisible():
             self._position_clipboard_panel()
@@ -3445,28 +3508,28 @@ class MainWindow(QMainWindow):
 
     def _build_header(self) -> QWidget:
         w = QWidget()
-        w.setFixedHeight(54)
+        w.setFixedHeight(80)
         w.setStyleSheet(f"background: {C.DARK}; border-bottom: 1px solid {C.BORDER_B};")
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setContentsMargins(22, 0, 22, 0)
 
         def _badge(txt, color=C.TEXT_MED):
             l = QLabel(txt)
-            l.setFont(QFont("Courier New", 8))
+            l.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_badge(APP_VERSION, C.PRI_DIM))
-        lay.addSpacing(8)
+        lay.addWidget(_badge(f"{self._assistant_name.upper()}  —  {APP_VERSION}", C.PRI))
+        lay.addSpacing(28)
         self._drawer_btn = QPushButton("⚙")
-        self._drawer_btn.setFixedSize(26, 26)
-        self._drawer_btn.setFont(QFont("Courier New", 11))
+        self._drawer_btn.setFixedSize(40, 40)
+        self._drawer_btn.setFont(QFont("Courier New", 15))
         self._drawer_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._drawer_btn.setToolTip("Settings & Controls")
         self._drawer_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent; color: {C.TEXT_DIM};
-                border: 1px solid {C.BORDER}; border-radius: 4px;
+                border: 1px solid {C.BORDER}; border-radius: 6px;
             }}
             QPushButton:hover {{ color: {C.PRI}; border-color: {C.PRI_DIM}; }}
             QPushButton:checked {{ color: {C.PRI}; border-color: {C.PRI}; background: {C.PRI_GHO}; }}
@@ -3480,7 +3543,7 @@ class MainWindow(QMainWindow):
         _disp = self._assistant_name.upper()
         self._title_lbl = QLabel(_disp)
         self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._title_lbl.setFont(QFont("Courier New", 17, QFont.Weight.Bold))
+        self._title_lbl.setFont(QFont("Courier New", 27, QFont.Weight.Bold))
         self._title_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         mid.addWidget(self._title_lbl)
         _sub_text = ("Just A Rather Very Intelligent System"
@@ -3488,21 +3551,21 @@ class MainWindow(QMainWindow):
                      else "Personal AI Assistant")
         self._sub_lbl = QLabel(_sub_text)
         self._sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._sub_lbl.setFont(QFont("Courier New", 7))
+        self._sub_lbl.setFont(QFont("Courier New", 9))
         self._sub_lbl.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent;")
         mid.addWidget(self._sub_lbl)
         lay.addLayout(mid)
         lay.addStretch()
 
-        right_col = QVBoxLayout(); right_col.setSpacing(2)
+        right_col = QVBoxLayout(); right_col.setSpacing(1)
         self._clock_lbl = QLabel("00:00:00")
-        self._clock_lbl.setFont(QFont("Courier New", 14, QFont.Weight.Bold))
+        self._clock_lbl.setFont(QFont("Courier New", 19, QFont.Weight.Bold))
         self._clock_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         self._clock_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._clock_lbl)
         self._date_lbl = QLabel("")
-        self._date_lbl.setFont(QFont("Courier New", 7))
-        self._date_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        self._date_lbl.setFont(QFont("Courier New", 9))
+        self._date_lbl.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent;")
         self._date_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._date_lbl)
         lay.addLayout(right_col)
@@ -3658,6 +3721,123 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._mute_btn)
 
         return w
+
+    def _build_hud_overlay(self, central: QWidget) -> None:
+        """Build the floating Iron-Man/JARVIS HUD controls without touching core logic."""
+        self._hud_activity_title = QLabel("▸  ACTIVITY LOG", central)
+        self._hud_activity_title.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        self._hud_activity_title.setStyleSheet(
+            f"color: {C.PRI}; background: transparent; letter-spacing: 1px;"
+        )
+
+        self._hud_transcript_title = QLabel("▸  LIVE TRANSCRIPT", central)
+        self._hud_transcript_title.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        self._hud_transcript_title.setStyleSheet(
+            f"color: {C.PRI}; background: transparent; letter-spacing: 1px;"
+        )
+
+        self._log.setFont(QFont("Courier New", 9))
+        self._log.setStyleSheet(f"""
+            QTextEdit {{
+                background: rgba(1, 13, 20, 225);
+                color: {C.ACC2};
+                border: 1px solid {C.BORDER_B};
+                border-radius: 11px;
+                padding: 10px;
+                selection-background-color: {C.PRI_GHO};
+            }}
+            QScrollBar:vertical {{ background: transparent; width: 5px; border: none; }}
+            QScrollBar::handle:vertical {{ background: {C.BORDER_B}; border-radius: 3px; min-height: 18px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; border: none; }}
+        """)
+        self._log.setFixedHeight(122)
+        self._log.setWordWrapMode(self._log.wordWrapMode())
+
+        self._transcript.setFont(QFont("Courier New", 10))
+        self._transcript.setStyleSheet(f"""
+            QTextEdit {{
+                background: rgba(0, 20, 32, 225);
+                color: {C.PRI};
+                border: 1px solid {C.PRI};
+                border-radius: 13px;
+                padding: 12px 14px;
+                selection-background-color: {C.PRI_GHO};
+            }}
+            QScrollBar:vertical {{ background: transparent; width: 5px; border: none; }}
+            QScrollBar::handle:vertical {{ background: {C.PRI_DIM}; border-radius: 3px; min-height: 18px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; border: none; }}
+        """)
+        self._transcript.setFixedHeight(150)
+        self._transcript.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+
+        self._hud_interrupt = _HudInterruptButton(central)
+        self._hud_interrupt.clicked.connect(self._do_interrupt)
+        self._hud_interrupt_label = QLabel("INTERRUPT", central)
+        self._hud_interrupt_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hud_interrupt_label.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._hud_interrupt_label.setStyleSheet(f"color: {C.RED}; background: transparent;")
+
+        self._hud_mic = _HudMicButton(central)
+        self._hud_mic.clicked.connect(self._toggle_mute)
+
+        self._hud_rail_left = QFrame(central)
+        self._hud_rail_left.setFrameShape(QFrame.Shape.HLine)
+        self._hud_rail_left.setStyleSheet(f"color: {C.BORDER}; background: {C.BORDER}; border: none;")
+        self._hud_rail_right = QFrame(central)
+        self._hud_rail_right.setFrameShape(QFrame.Shape.HLine)
+        self._hud_rail_right.setStyleSheet(f"color: {C.BORDER}; background: {C.BORDER}; border: none;")
+
+        for w in (
+            self._hud_activity_title, self._log,
+            self._hud_transcript_title, self._transcript,
+            self._hud_interrupt, self._hud_interrupt_label,
+            self._hud_mic, self._hud_rail_left, self._hud_rail_right,
+        ):
+            w.raise_()
+
+        self._position_hud_overlay()
+
+    def _position_hud_overlay(self) -> None:
+        """Responsive placement matching the supplied JARVIS reference image."""
+        if not hasattr(self, "_hud_mic"):
+            return
+        cw = self.centralWidget()
+        W, H = cw.width(), cw.height()
+        if W < 10 or H < 10:
+            return
+
+        right_w = min(455, max(360, int(W * 0.31)))
+        right_x = W - right_w - 24
+        top = 22
+
+        self._hud_activity_title.setGeometry(right_x, top, right_w, 24)
+        self._log.setGeometry(right_x, top + 25, right_w, 122)
+
+        tr_top = top + 166
+        self._hud_transcript_title.setGeometry(right_x, tr_top, right_w, 24)
+        self._transcript.setGeometry(right_x, tr_top + 25, right_w, 150)
+
+        # Controls sit at the lower centre of the whole HUD, not in a sidebar.
+        mic_x = (W - 82) // 2
+        mic_y = H - 112
+        self._hud_mic.setGeometry(mic_x, mic_y, 82, 82)
+
+        int_x = mic_x - 78
+        int_y = mic_y + 10
+        self._hud_interrupt.setGeometry(int_x, int_y, 48, 48)
+        self._hud_interrupt_label.setGeometry(int_x - 20, int_y + 48, 88, 18)
+
+        rail_y = mic_y + 60
+        self._hud_rail_left.setGeometry(max(18, int_x - 250), rail_y, 210, 1)
+        self._hud_rail_right.setGeometry(mic_x + 124, rail_y, 210, 1)
+
+        for w in (
+            self._hud_activity_title, self._log,
+            self._hud_transcript_title, self._transcript,
+            self._hud_interrupt, self._hud_interrupt_label,
+            self._hud_mic, self._hud_rail_left, self._hud_rail_right,
+        ):
+            w.raise_()
 
     def _build_quick_drawer(self) -> QWidget:
         """Floating overlay panel shown when the ⚙ header button is toggled."""
@@ -3948,11 +4128,9 @@ class MainWindow(QMainWindow):
         self._content_display.moveCursor(
             self._content_display.textCursor().MoveOperation.Start
         )
-        first_show = not self._content_panel.isVisible()
-        self._content_panel.show()
-        if first_show:
-            total = self._center_split.height()
-            self._center_split.setSizes([max(total - 220, 120), 220])
+        # The reference HUD has no persistent bottom content strip. Keep the
+        # existing content feature available, but do not let it resize the orb.
+        self._content_panel.hide()
 
     def _build_footer(self) -> QWidget:
         w = QWidget()
@@ -4294,6 +4472,9 @@ class MainWindow(QMainWindow):
         self._log._ai_name_lc = self._assistant_name.lower()
         self.hud._assistant_name = display
         self._transcript.set_ai_name(self._assistant_name)
+        if hasattr(self, "_hud_activity_title"):
+            self._hud_activity_title.setText("▸  ACTIVITY LOG")
+            self._hud_transcript_title.setText("▸  LIVE TRANSCRIPT")
 
         color_changed = False
         if ui_color:
@@ -4463,6 +4644,8 @@ class MainWindow(QMainWindow):
             self._log.append_log("SYS: Microphone active.")
 
     def _style_mute_btn(self):
+        if hasattr(self, "_hud_mic"):
+            self._hud_mic.setToolTip("Microphone muted — click to unmute")
         if self._muted:
             self._mute_btn.setText("🔇  MICROPHONE MUTED")
             self._mute_btn.setStyleSheet(f"""
@@ -4472,6 +4655,8 @@ class MainWindow(QMainWindow):
                 }}
             """)
         else:
+            if hasattr(self, "_hud_mic"):
+                self._hud_mic.setToolTip("Microphone active — click to mute")
             self._mute_btn.setText("🎙  MICROPHONE ACTIVE")
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{

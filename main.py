@@ -41,6 +41,7 @@ import time
 import json
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -375,7 +376,12 @@ class JarvisLive:
         # text is held back until playback reaches the audio received with it.
         self._aud_in      = 0      # bytes of AI audio queued for playback
         self._aud_out     = 0      # bytes of AI audio actually played
-        self._pending_ai: list = []   # [(release_at_bytes, text | None)]  None = end of turn
+        # [(release_at_bytes, future_or_none, original_text)]
+        # None future = end-of-turn marker.  AI transcript translation runs in
+        # one background worker so it never blocks JARVIS audio playback.
+        self._pending_ai: list = []
+        self._caption_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-caption")
+        self._caption_client = None
         self.out_queue            = None
         self._loop                     = None
         self._is_speaking         = False
@@ -660,15 +666,58 @@ class JarvisLive:
             self._live_got_text = True
         self.ui.transcript_live("you", text, final)
 
+    def _english_ai_caption(self, text: str) -> str:
+        """Return an English-only display caption without changing spoken audio."""
+        text = (text or "").strip()
+        if not text or text.isascii():
+            return text
+        try:
+            if self._caption_client is None:
+                self._caption_client = genai.Client(api_key=_get_api_key())
+            resp = self._caption_client.models.generate_content(
+                model="gemini-flash-latest",
+                contents=(
+                    "Translate the following JARVIS speech transcript into natural English. "
+                    "Return ONLY the English translation. Preserve the meaning and do not "
+                    "add commentary, explanations, or quotation marks.\n\n"
+                    + text
+                ),
+            )
+            translated = _clean_transcript(resp.text or "")
+            return translated or text
+        except Exception:
+            # Never let caption translation affect the assistant. If translation
+            # is unavailable, keep the original transcript rather than losing it.
+            return text
+
     def _flush_ai(self, force: bool = False) -> None:
-        """Show held-back AI transcript text whose audio has now been played."""
+        """Show AI captions when their matching audio has reached the speaker."""
         p = self._pending_ai
         while p and (force or p[0][0] <= self._aud_out):
-            _, t = p.pop(0)
-            if t is None:
+            _, future, original = p[0]
+            if future is None:
+                p.pop(0)
                 self.ui.transcript_end_turn()
+                continue
+
+            # Do not hold the audio loop hostage. If translation is still running,
+            # wait for the next playback tick and try again.
+            if not future.done():
+                if force:
+                    try:
+                        translated = future.result(timeout=0.25)
+                    except Exception:
+                        translated = original
+                else:
+                    break
             else:
-                self.ui.transcript("ai", t)
+                try:
+                    translated = future.result()
+                except Exception:
+                    translated = original
+
+            p.pop(0)
+            self.ui.transcript("ai", (translated or original or "") + " ")
 
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
@@ -1076,8 +1125,13 @@ class JarvisLive:
                             txt = _clean_transcript(sc.output_transcription.text)
                             if txt and txt != (out_buf[-1] if out_buf else ""):
                                 out_buf.append(txt)
-                                # held until the matching audio is actually played
-                                self._pending_ai.append((self._aud_in, txt + " "))
+                                # Translate the visible caption to English in the
+                                # background. The actual JARVIS voice is untouched.
+                                _cap_future = self._caption_executor.submit(
+                                    self._english_ai_caption, txt
+                                )
+                                # Hold it until the matching audio is actually played.
+                                self._pending_ai.append((self._aud_in, _cap_future, txt + " "))
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
@@ -1126,7 +1180,7 @@ class JarvisLive:
                                         "ts": datetime.now().isoformat(),
                                     }))
                             out_buf = []
-                            self._pending_ai.append((self._aud_in, None))   # end of turn, after its audio
+                            self._pending_ai.append((self._aud_in, None, None))   # end of turn, after its audio
 
                             # Vision injection: model finished tool-response turn → now send the image
                             if self._pending_vision and self.session:
