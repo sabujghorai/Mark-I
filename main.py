@@ -452,7 +452,9 @@ class JarvisLive:
         # ── Wake word ────────────────────────────────────────────────────────
         # _awake gates the mic (see _listen_audio) and the background speakers.
         # It is True whenever wake word is OFF, so default behaviour is unchanged.
-        self._wake_enabled     = get_wake_word_enabled()
+        # Start JARVIS awake so the microphone and Gemini Live session work immediately.
+        # Wake-word mode can still be enabled later from the UI settings.
+        self._wake_enabled     = False
         self._awake            = not self._wake_enabled
         self._wake_detector: WakeWordDetector | None = None
         self._wake_sleep_timeout = WAKE_SLEEP_TIMEOUT
