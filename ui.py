@@ -1,3 +1,14 @@
+"""
+ui.py - JARVIS interface (reference-screenshot layout).
+
+  * header: "<NAME> - MARK LIII", gear, centred title, clock
+  * big dotted orb (orb_hud.OrbCanvas) with status line
+  * right column: ACTIVITY LOG + LIVE TRANSCRIPT (typed out along with the voice)
+  * bottom bar: INTERRUPT + round microphone button
+
+Needs orb_hud.py (the new one) next to this file. Public API of JarvisUI is
+unchanged, so main.py keeps working.
+"""
 from __future__ import annotations
 
 import json
@@ -10,8 +21,6 @@ import sys
 import threading
 import time
 from pathlib import Path
-
-import psutil
 
 if platform.system() == "Windows":
     _WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
@@ -60,10 +69,13 @@ def _read_full_config() -> dict:
         return {}
 
 
-_DEFAULT_W, _DEFAULT_H = 980, 700
-_MIN_W,     _MIN_H     = 820, 580
-_LEFT_W  = 148
-_RIGHT_W = 340
+_DEFAULT_W, _DEFAULT_H = 1280, 800
+_MIN_W,     _MIN_H     = 780, 560
+_RIGHT_W = 470
+
+# Small one-line command box under the transcript (not in the reference image,
+# but typing commands is a real feature). Set to False for the exact screenshot.
+SHOW_TEXT_INPUT = True
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
@@ -179,630 +191,8 @@ def qcol(h: str, a: int = 255) -> QColor:
     c = QColor(h); c.setAlpha(a); return c
 
 
-# ── Windows GPU via NVML DLL (no subprocess, no console window) ──────────────
-_nvml_lib: object = None   # cached ctypes DLL
-_nvml_ok:  object = None   # None=untested, True=works, False=unavailable
-
-
-def _nvml_gpu_windows() -> float:
-    """Return NVIDIA GPU utilisation % using nvml.dll directly — zero subprocess."""
-    global _nvml_lib, _nvml_ok
-    if _nvml_ok is False:
-        return -1.0
-    try:
-        import ctypes
-
-        class _Util(ctypes.Structure):
-            _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
-
-        if _nvml_lib is None:
-            for dll_name in ("nvml", r"C:\Windows\System32\nvml.dll"):
-                try:
-                    lib = ctypes.WinDLL(dll_name)
-                    lib.nvmlInit_v2()
-                    _nvml_lib = lib
-                    break
-                except Exception:
-                    continue
-
-        if _nvml_lib is None:
-            import pynvml  # type: ignore
-            pynvml.nvmlInit()
-            h = pynvml.nvmlDeviceGetHandleByIndex(0)
-            _nvml_ok = True
-            return float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
-
-        dev = ctypes.c_void_p()
-        _nvml_lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev))
-        util = _Util()
-        _nvml_lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(util))
-        _nvml_ok = True
-        return float(util.gpu)
-    except Exception:
-        _nvml_ok = False
-        return -1.0
-
-
-class _SysMetrics:
-    def __init__(self):
-        self.cpu  = 0.0
-        self.mem  = 0.0
-        self.net  = 0.0   
-        self.gpu  = -1.0  
-        self.tmp  = -1.0  
-        self._lock = threading.Lock()
-        self._last_net = psutil.net_io_counters()
-        self._last_net_t = time.time()
-        self._running = True
-        # Probe caches — GPU (NVML) and temperature (WMI) are the expensive
-        # queries; initialise their handles once and reuse them instead of
-        # rebuilding a connection on every poll.
-        self._slow_tick = 0            # gpu/temp refreshed every 3rd cycle
-        self._pynvml    = None         # cached pynvml module + device handle
-        self._pynvml_h  = None
-        self._pynvml_ok = None         # None=untested, False=unavailable here
-        self._nv_unix   = None         # cached (lib, dev) for Linux/macOS NVML
-        self._wmi_conn  = None         # cached WMI connection (creating one is slow)
-        self._wmi_ok    = None         # None=untested, False=unavailable here
-        t = threading.Thread(target=self._loop, daemon=True)
-        t.start()
-
-    def _loop(self):
-        while self._running:
-            try:
-                self._update()
-            except Exception:
-                pass
-            time.sleep(2.0)
-
-    def _update(self):
-        cpu = psutil.cpu_percent(interval=None)
-        mem = psutil.virtual_memory().percent
-
-        nc  = psutil.net_io_counters()
-        now = time.time()
-        dt  = now - self._last_net_t
-        if dt > 0:
-            sent = (nc.bytes_sent - self._last_net.bytes_sent) / dt
-            recv = (nc.bytes_recv - self._last_net.bytes_recv) / dt
-            net  = (sent + recv) / (1024 * 1024)
-        else:
-            net = 0.0
-        self._last_net   = nc
-        self._last_net_t = now
-
-        # GPU and temperature change slowly and are the most expensive probes
-        # (NVML / WMI) — refresh them every 3rd cycle (~6 s) instead of every
-        # cycle, reusing the previous reading in between.
-        self._slow_tick = (self._slow_tick + 1) % 3
-        if self._slow_tick == 1:
-            gpu = self._get_gpu()
-            tmp = self._get_temp()
-        else:
-            gpu = self.gpu
-            tmp = self.tmp
-
-        with self._lock:
-            self.cpu = cpu
-            self.mem = mem
-            self.net = net
-            self.gpu = gpu
-            self.tmp = tmp
-
-    def _get_gpu(self) -> float:
-        # pynvml — subprocess-free; initialise once and reuse the handle.
-        # Re-initialising NVML on every poll is slow, so cache it and stop
-        # retrying pynvml entirely once it proves unavailable here.
-        if self._pynvml_ok is not False:
-            try:
-                if self._pynvml_h is None:
-                    import pynvml  # type: ignore
-                    pynvml.nvmlInit()
-                    self._pynvml    = pynvml
-                    self._pynvml_h  = pynvml.nvmlDeviceGetHandleByIndex(0)
-                    self._pynvml_ok = True
-                return float(self._pynvml.nvmlDeviceGetUtilizationRates(self._pynvml_h).gpu)
-            except Exception:
-                self._pynvml_ok = False
-
-        # Windows: nvml.dll via ctypes (already cached in _nvml_gpu_windows)
-        if _OS == "Windows":
-            return _nvml_gpu_windows()
-
-        # Linux / macOS: libnvidia-ml shared lib via ctypes — init once, reuse
-        try:
-            import ctypes
-
-            class _Util(ctypes.Structure):
-                _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
-
-            if self._nv_unix is None:
-                _lib = "libnvidia-ml.so.1" if _OS == "Linux" else "libnvidia-ml.dylib"
-                nv = ctypes.CDLL(_lib)
-                nv.nvmlInit_v2()
-                dev = ctypes.c_void_p()
-                nv.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev))
-                self._nv_unix = (nv, dev)
-
-            nv, dev = self._nv_unix
-            u = _Util()
-            nv.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(u))
-            return float(u.gpu)
-        except Exception:
-            pass
-
-        return -1.0   # N/A — zero subprocess on all platforms
-
-    def _get_temp(self) -> float:
-        # psutil — works on Linux; occasionally Windows with driver support
-        try:
-            temps = psutil.sensors_temperatures()
-            for name in ["coretemp", "k10temp", "cpu_thermal", "acpitz",
-                         "cpu-thermal", "zenpower", "it8688"]:
-                if name in temps and temps[name]:
-                    return temps[name][0].current
-            for entries in temps.values():
-                if entries:
-                    return entries[0].current
-        except Exception:
-            pass
-
-        # Windows: wmi module (pure Python COM, zero subprocess). Reuse a single
-        # connection — building a fresh wmi.WMI() on every poll spins up a COM
-        # connection each time and is very slow. Give up after one failure.
-        if _OS == "Windows" and self._wmi_ok is not False:
-            try:
-                if self._wmi_conn is None:
-                    import wmi  # type: ignore
-                    self._wmi_conn = wmi.WMI(namespace="root/wmi")
-                tz = self._wmi_conn.MSAcpi_ThermalZoneTemperature()
-                if tz:
-                    return (tz[0].CurrentTemperature / 10.0) - 273.15
-            except Exception:
-                self._wmi_ok   = False
-                self._wmi_conn = None
-
-        return -1.0   # N/A — zero subprocess on all platforms
-
-    def snapshot(self) -> dict:
-        with self._lock:
-            return {
-                "cpu": self.cpu,
-                "mem": self.mem,
-                "net": self.net,
-                "gpu": self.gpu,
-                "tmp": self.tmp,
-            }
-
-
-_metrics = _SysMetrics()
-
 from orb_hud import OrbCanvas, TranscriptWidget
 
-
-class HudCanvas(QWidget):
-    def __init__(self, face_path: str, assistant_name: str = "J.A.R.V.I.S", parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
-        self.setMinimumSize(300, 300)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
-        self.muted    = False
-        self.speaking = False
-        self.state    = "INITIALISING"
-        self._assistant_name = assistant_name
-
-        self._tick       = 0
-        self._scale      = 1.0
-        self._tgt_scale  = 1.0
-        self._halo       = 55.0
-        self._tgt_halo   = 55.0
-        self._last_t     = time.time()
-        self._scan       = 0.0
-        self._scan2      = 180.0
-        self._rings      = [0.0, 120.0, 240.0]
-        self._pulses: list[float] = [0.0, 50.0, 100.0]
-        self._blink      = True
-        self._blink_tick = 0
-        self._particles: list[list[float]] = []
-        self._face_px: QPixmap | None = None
-        # Rescaled-face cache: the smooth rescale is expensive, so we keep the
-        # last result and only rebuild it when the (quantised) size changes.
-        self._face_cache: QPixmap | None = None
-        self._face_cache_sz = -1
-        # Static grid-dot layer, pre-rendered once per size/theme into a pixmap
-        # so paintEvent blits it in one call instead of thousands of drawPoint()s.
-        self._grid_cache: QPixmap | None = None
-        self._grid_key = None
-        # Repaint throttle counter (idle frames drop to ~20 Hz — see _step()).
-        self._paint_tick = 0
-        self._load_face(face_path)
-
-        # Live audio reactivity: _live_amp is written from the audio threads
-        # (0.0–1.0), _amp_disp is the smoothed value the paint code reads.
-        self._live_amp  = 0.0
-        self._amp_disp  = 0.0
-        self._base_scale = 1.0    # slow "breathing" target; amp is added per-frame
-        self._base_halo  = 55.0
-
-        self._tmr = QTimer(self)
-        self._tmr.timeout.connect(self._step)
-        self._tmr.start(16)
-
-    def set_audio_level(self, level: float) -> None:
-        """Thread-safe entry point for the audio threads. Stores the louder of
-        the incoming level and the current value so brief gaps between chunks
-        don't make the waveform stutter; _step() decays it back down."""
-        try:
-            lv = float(level)
-        except (TypeError, ValueError):
-            return
-        if lv < 0.0:
-            lv = 0.0
-        elif lv > 1.0:
-            lv = 1.0
-        if lv > self._live_amp:
-            self._live_amp = lv
-
-    def _load_face(self, path: str):
-        try:
-            from PIL import Image, ImageDraw
-            import io
-            img = Image.open(path).convert("RGBA")
-            sz  = min(img.size)
-            img = img.resize((sz, sz), Image.LANCZOS)
-            mk  = Image.new("L", (sz, sz), 0)
-            ImageDraw.Draw(mk).ellipse((2, 2, sz - 2, sz - 2), fill=255)
-            img.putalpha(mk)
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            px = QPixmap(); px.loadFromData(buf.getvalue())
-            self._face_px = px
-        except Exception:
-            self._face_px = None
-        # New source image → drop the rescaled cache so it rebuilds on next paint.
-        self._face_cache    = None
-        self._face_cache_sz = -1
-
-    def _make_grid(self, W: int, H: int) -> QPixmap:
-        """Pre-render the static grid-dot background into a transparent pixmap so
-        paintEvent can blit it once per frame instead of running a nested
-        drawPoint() loop across the whole widget every 16 ms."""
-        pm = QPixmap(max(1, W), max(1, H))
-        pm.fill(Qt.GlobalColor.transparent)
-        gp = QPainter(pm)
-        gp.setPen(QPen(qcol(C.PRI_GHO), 1))
-        for x in range(0, W, 48):
-            for y in range(0, H, 48):
-                gp.drawPoint(x, y)
-        gp.end()
-        return pm
-
-    def _step(self):
-        self._tick += 1
-        now = time.time()
-
-        # ── Live audio reactivity ────────────────────────────────────────────
-        # Audio threads push peaks into _live_amp; decay it toward silence so
-        # gaps between chunks fade out instead of freezing, then smooth it.
-        self._live_amp *= 0.86
-        self._amp_disp += (self._live_amp - self._amp_disp) * 0.45
-        amp = self._amp_disp
-
-        # Slow "breathing" base target (random shimmer), refreshed on a timer.
-        if now - self._last_t > (0.12 if self.speaking else 0.5):
-            if self.speaking:
-                self._base_scale = 1.03
-                self._base_halo  = 122.0
-            elif self.muted:
-                self._base_scale = random.uniform(0.998, 1.002)
-                self._base_halo  = random.uniform(15, 28)
-            else:
-                self._base_scale = random.uniform(1.001, 1.008)
-                self._base_halo  = random.uniform(48, 68)
-            self._last_t = now
-
-        # Every frame, the live audio level lifts the target on top of the base
-        # — this is what makes the core visibly pulse to the actual voice.
-        if self.muted:
-            self._tgt_scale, self._tgt_halo = self._base_scale, self._base_halo
-        elif self.speaking:
-            self._tgt_scale = self._base_scale + amp * 0.13
-            self._tgt_halo  = self._base_halo  + amp * 95.0
-        else:
-            self._tgt_scale = self._base_scale + amp * 0.06
-            self._tgt_halo  = self._base_halo  + amp * 75.0
-
-        sp = 0.38 if self.speaking else (0.30 if amp > 0.02 else 0.15)
-        self._scale += (self._tgt_scale - self._scale) * sp
-        self._halo  += (self._tgt_halo  - self._halo)  * sp
-
-        # Rings/scanners spin faster while speaking, reacting to loudness.
-        boost  = 1.0 + amp * 1.6
-        speeds = ([1.3, -0.9, 2.0] if self.speaking else [0.55, -0.35, 0.9])
-        for i, spd in enumerate(speeds):
-            self._rings[i] = (self._rings[i] + spd * boost) % 360
-
-        self._scan  = (self._scan  + (3.0 if self.speaking else 1.3) * boost) % 360
-        self._scan2 = (self._scan2 + (-2.0 if self.speaking else -0.75) * boost) % 360
-
-        fw  = min(self.width(), self.height())
-        lim = fw * 0.74
-        spd = 4.2 if self.speaking else 2.0
-        self._pulses = [r + spd for r in self._pulses if r + spd < lim]
-        if len(self._pulses) < 3 and random.random() < (0.07 if self.speaking else 0.025):
-            self._pulses.append(0.0)
-
-        if self.speaking and random.random() < 0.28:
-            cx, cy = self.width() / 2, self.height() / 2
-            ang = random.uniform(0, 2 * math.pi)
-            r_s = fw * 0.28
-            self._particles.append([
-                cx + math.cos(ang) * r_s, cy + math.sin(ang) * r_s,
-                math.cos(ang) * random.uniform(0.9, 2.4),
-                math.sin(ang) * random.uniform(0.9, 2.4) - 0.4, 1.0,
-            ])
-        self._particles = [
-            [p[0]+p[2], p[1]+p[3], p[2]*0.97, p[3]*0.97, p[4]-0.028]
-            for p in self._particles if p[4] > 0
-        ]
-
-        self._blink_tick += 1
-        if self._blink_tick >= 38:
-            self._blink = not self._blink
-            self._blink_tick = 0
-            _blinked = True
-        else:
-            _blinked = False
-
-        # Repaint throttling — advancing the animation state above is cheap at
-        # 60 Hz, but the paint is heavy. Repaint every frame while something is
-        # actually happening (speaking, audio, thinking) or when the blink
-        # toggles; otherwise drop to ~20 Hz so an idle HUD stops pinning a CPU
-        # core. The visuals stay smooth because the state keeps stepping.
-        self._paint_tick = (self._paint_tick + 1) % 3
-        active = (self.speaking or amp > 0.02
-                  or self.state in ("THINKING", "PROCESSING"))
-        if active or _blinked or self._paint_tick == 0:
-            self.update()
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        if not p.isActive():      # device not ready (e.g. 0-size during layout) — skip cleanly
-            return
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), qcol(C.BG))
-
-        W, H = self.width(), self.height()
-        cx, cy = W / 2, H / 2
-        fw = min(W, H)
-
-        # grid dots — blitted from a cached layer; rebuilt only when the size
-        # or the theme's ghost colour changes (so live re-theming still works).
-        _gkey = (W, H, C.PRI_GHO)
-        if self._grid_cache is None or self._grid_key != _gkey:
-            self._grid_cache = self._make_grid(W, H)
-            self._grid_key   = _gkey
-        p.drawPixmap(0, 0, self._grid_cache)
-
-        r_face = fw * 0.31
-
-        # halo glow
-        for i in range(10):
-            r   = r_face * (1.8 - i * 0.08)
-            frc = 1.0 - i / 10
-            a   = max(0, min(255, int(self._halo * 0.085 * frc)))
-            col = qcol(C.MUTED_C if self.muted else C.PRI, a)
-            p.setPen(QPen(col, 1.5)); p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
-
-        # pulse rings
-        for pr in self._pulses:
-            a   = max(0, int(230 * (1.0 - pr / (fw * 0.74))))
-            col = qcol(C.MUTED_C if self.muted else C.PRI, a)
-            p.setPen(QPen(col, 1.5)); p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawEllipse(QRectF(cx - pr, cy - pr, pr * 2, pr * 2))
-
-        # spinning arc rings
-        for idx, (r_frac, w_r, arc_l, gap) in enumerate(
-            [(0.48, 3, 115, 78), (0.40, 2, 78, 55), (0.32, 1, 56, 40)]
-        ):
-            ring_r = fw * r_frac
-            base   = self._rings[idx]
-            a_val  = max(0, min(255, int(self._halo * (1.0 - idx * 0.18))))
-            col    = qcol(C.MUTED_C if self.muted else C.PRI, a_val)
-            p.setPen(QPen(col, w_r)); p.setBrush(Qt.BrushStyle.NoBrush)
-            angle = base
-            rect  = QRectF(cx - ring_r, cy - ring_r, ring_r * 2, ring_r * 2)
-            while angle < base + 360:
-                p.drawArc(rect, int(angle * 16), int(arc_l * 16))
-                angle += arc_l + gap
-
-        # scanners
-        sr = fw * 0.50
-        sa = min(255, int(self._halo * 1.5))
-        ex = 75 if self.speaking else 44
-        p.setPen(QPen(qcol(C.MUTED_C if self.muted else C.PRI, sa), 2.5))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        srect = QRectF(cx - sr, cy - sr, sr * 2, sr * 2)
-        p.drawArc(srect, int(self._scan * 16), int(ex * 16))
-        p.setPen(QPen(qcol(C.ACC, sa // 2), 1.5))
-        p.drawArc(srect, int(self._scan2 * 16), int(ex * 16))
-
-        # tick marks
-        t_out, t_in = fw * 0.497, fw * 0.474
-        p.setPen(QPen(qcol(C.PRI, 140), 1))
-        for deg in range(0, 360, 10):
-            rad = math.radians(deg)
-            inn = t_in if deg % 30 == 0 else t_in + 6
-            p.drawLine(
-                QPointF(cx + t_out * math.cos(rad), cy - t_out * math.sin(rad)),
-                QPointF(cx + inn  * math.cos(rad), cy - inn  * math.sin(rad)),
-            )
-
-        # crosshair
-        ch_r, gap_h = fw * 0.51, fw * 0.16
-        p.setPen(QPen(qcol(C.PRI, int(self._halo * 0.5)), 1))
-        p.drawLine(QPointF(cx - ch_r, cy), QPointF(cx - gap_h, cy))
-        p.drawLine(QPointF(cx + gap_h, cy), QPointF(cx + ch_r, cy))
-        p.drawLine(QPointF(cx, cy - ch_r), QPointF(cx, cy - gap_h))
-        p.drawLine(QPointF(cx, cy + gap_h), QPointF(cx, cy + ch_r))
-
-        # corner brackets
-        bl = 24
-        bc = qcol(C.PRI, 210)
-        hl, hr = cx - fw // 2, cx + fw // 2
-        ht, hb = cy - fw // 2, cy + fw // 2
-        p.setPen(QPen(bc, 2))
-        for bx, by, dx, dy in [(hl,ht,1,1),(hr,ht,-1,1),(hl,hb,1,-1),(hr,hb,-1,-1)]:
-            p.drawLine(QPointF(bx, by), QPointF(bx + dx * bl, by))
-            p.drawLine(QPointF(bx, by), QPointF(bx, by + dy * bl))
-
-        # face
-        if self._face_px:
-            fsz = int(fw * 0.62 * self._scale)
-            # Quantise the target size so the expensive smooth rescale only runs
-            # when it visibly changes — not on every 1 px "breathing" step.
-            q_sz = max(1, (fsz // 4) * 4)
-            if self._face_cache is None or self._face_cache_sz != q_sz:
-                self._face_cache = self._face_px.scaled(
-                    q_sz, q_sz,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                self._face_cache_sz = q_sz
-            scaled = self._face_cache
-            p.drawPixmap(int(cx - scaled.width() / 2),
-                         int(cy - scaled.height() / 2), scaled)
-        else:
-            orb_r = int(fw * 0.27 * self._scale)
-            oc    = (200, 0, 50) if self.muted else (0, 60, 110)
-            for i in range(8, 0, -1):
-                r2  = int(orb_r * i / 8)
-                frc = i / 8
-                a   = max(0, min(255, int(self._halo * 1.1 * frc)))
-                p.setBrush(QBrush(QColor(int(oc[0]*frc), int(oc[1]*frc), int(oc[2]*frc), a)))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.drawEllipse(QRectF(cx - r2, cy - r2, r2 * 2, r2 * 2))
-            p.setPen(QPen(qcol(C.PRI, min(255, int(self._halo * 2))), 1))
-            p.setFont(QFont("Courier New", 13, QFont.Weight.Bold))
-            p.drawText(QRectF(cx - 80, cy - 14, 160, 28),
-                       Qt.AlignmentFlag.AlignCenter, self._assistant_name)
-
-        # particles
-        for pt in self._particles:
-            a = max(0, min(255, int(pt[4] * 255)))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(qcol(C.PRI, a)))
-            p.drawEllipse(QPointF(pt[0], pt[1]), 2.5, 2.5)
-
-        # status text
-        sy = cy + fw * 0.40
-        if self.muted:
-            txt, col = "⊘  MUTED",     qcol(C.MUTED_C)
-        elif self.speaking:
-            txt, col = "●  SPEAKING",  qcol(C.ACC)
-        elif self.state == "THINKING":
-            sym = "◈" if self._blink else "◇"
-            txt, col = f"{sym}  THINKING",   qcol(C.ACC2)
-        elif self.state == "PROCESSING":
-            sym = "▷" if self._blink else "▶"
-            txt, col = f"{sym}  PROCESSING", qcol(C.ACC2)
-        elif self.state == "LISTENING":
-            sym = "●" if self._blink else "○"
-            txt, col = f"{sym}  LISTENING",  qcol(C.GREEN)
-        else:
-            sym = "●" if self._blink else "○"
-            txt, col = f"{sym}  {self.state}", qcol(C.PRI)
-
-        p.setPen(QPen(col, 1))
-        p.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
-        p.drawText(QRectF(0, sy, W, 26), Qt.AlignmentFlag.AlignCenter, txt)
-
-        # waveform — reacts to the real audio level (mic while listening,
-        # JARVIS's own voice while speaking). Falls back to a gentle idle
-        # ripple when there's no sound. _amp_disp is the smoothed 0–1 level.
-        wy = sy + 30
-        N, bw = 36, 8
-        wx0 = (W - N * bw) / 2
-        amp = self._amp_disp
-        mid = (N - 1) / 2.0
-        for i in range(N):
-            if self.muted:
-                hgt, cl = 2, qcol(C.MUTED_C)
-            else:
-                env     = (1.0 - abs(i - mid) / mid) ** 0.7      # center-weighted hump
-                shimmer = 0.55 + 0.45 * math.sin(self._tick * 0.18 + i * 0.7)
-                idle    = 3.0 + 2.0 * math.sin(self._tick * 0.09 + i * 0.6)
-                hgt     = int(max(2, min(24, idle + amp * 22.0 * env * shimmer)))
-                if amp > 0.05:
-                    cl = qcol(C.PRI) if hgt > 12 else qcol(C.PRI_DIM)
-                else:
-                    cl = qcol(C.BORDER_B)
-            p.fillRect(QRectF(wx0 + i * bw, wy + 20 - hgt, bw - 1, hgt), cl)
-
-        p.end()   # end deterministically so the backing store never flushes an active painter
-
-class MetricBar(QWidget):
-
-    def __init__(self, label: str, color: str = C.PRI, parent=None):
-        super().__init__(parent)
-        self._label = label
-        self._color = color
-        self._value = 0.0       # 0–100
-        self._text  = "--"
-        self.setFixedHeight(38)
-        self.setMinimumWidth(80)
-
-    def set_value(self, pct: float, text: str):
-        v = max(0.0, min(100.0, pct))
-        if v == self._value and text == self._text:
-            return          # unchanged — skip the repaint
-        self._value = v
-        self._text  = text
-        self.update()
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        if not p.isActive():
-            return
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        W, H = self.width(), self.height()
-
-        p.setBrush(QBrush(qcol(C.PANEL2)))
-        p.setPen(QPen(qcol(C.BORDER_A), 1))
-        p.drawRoundedRect(QRectF(1, 1, W - 2, H - 2), 4, 4)
-
-        bar_h   = 4
-        bar_y   = H - bar_h - 5
-        bar_w   = W - 12
-        bar_x   = 6
-        fill_w  = int(bar_w * self._value / 100)
-
-        p.setBrush(QBrush(qcol(C.BAR_BG)))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(QRectF(bar_x, bar_y, bar_w, bar_h), 2, 2)
-
-        if self._value > 85:
-            bar_col = qcol(C.RED)
-        elif self._value > 65:
-            bar_col = qcol(C.ACC)
-        else:
-            bar_col = qcol(self._color)
-
-        if fill_w > 0:
-            p.setBrush(QBrush(bar_col))
-            p.drawRoundedRect(QRectF(bar_x, bar_y, fill_w, bar_h), 2, 2)
-
-        p.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-        p.setPen(QPen(qcol(C.TEXT_DIM), 1))
-        p.drawText(QRectF(8, 5, 50, 14), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._label)
-
-        p.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
-        p.setPen(QPen(bar_col if self._text != "--" else qcol(C.TEXT_DIM), 1))
-        p.drawText(QRectF(0, 4, W - 6, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, self._text)
-
-        p.end()
 
 class LogWidget(QTextEdit):
     _sig = pyqtSignal(str)
@@ -819,9 +209,9 @@ class LogWidget(QTextEdit):
             QTextEdit {{
                 background: {C.PANEL};
                 color: {C.TEXT};
-                border: 1px solid {C.BORDER};
-                border-radius: 4px;
-                padding: 6px;
+                border: 1px solid {C.BORDER_B};
+                border-radius: 10px;
+                padding: 8px 10px;
                 selection-background-color: {C.PRI_GHO};
             }}
             QScrollBar:vertical {{
@@ -2737,6 +2127,132 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+_BAR_H = 104
+
+
+class _RoundButton(QWidget):
+    """Round icon button drawn by hand: kind is 'mic' or 'interrupt'."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, kind: str, parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self._hover = False
+        self.muted = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+
+    def set_muted(self, v: bool) -> None:
+        if v != self.muted:
+            self.muted = v
+            self.update()
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._kind == "mic":
+            self._paint_mic(p)
+        else:
+            self._paint_interrupt(p)
+        p.end()
+
+    def _paint_mic(self, p: QPainter) -> None:
+        W, H = self.width(), self.height()
+        cx, cy = W / 2, H / 2
+        hexcol = C.MUTED_C if self.muted else C.PRI
+        col = qcol(hexcol)
+        r = min(W, H) / 2 - 12
+
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for dr, a in ((10, 28), (5, 60)):                       # soft outer rings
+            p.setPen(QPen(qcol(hexcol, a), 1.5))
+            p.drawEllipse(QPointF(cx, cy), r + dr, r + dr)
+
+        p.setBrush(QBrush(qcol(hexcol, 55 if self._hover else 30)))
+        p.setPen(QPen(col, 2.5))
+        p.drawEllipse(QPointF(cx, cy), r, r)
+
+        pen = QPen(col, 2.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(cx - 7, cy - 18, 14, 24), 7, 7)    # capsule
+        p.drawArc(QRectF(cx - 13, cy - 9, 26, 26), 180 * 16, 180 * 16)
+        p.drawLine(QPointF(cx, cy + 17), QPointF(cx, cy + 22))
+        p.drawLine(QPointF(cx - 6, cy + 22), QPointF(cx + 6, cy + 22))
+        if self.muted:
+            p.drawLine(QPointF(cx - 15, cy - 17), QPointF(cx + 15, cy + 19))
+
+    def _paint_interrupt(self, p: QPainter) -> None:
+        W = self.width()
+        cx, cy = W / 2, 26.0
+        col = qcol(C.MUTED_C)
+        p.setBrush(QBrush(qcol(C.MUTED_C, 60 if self._hover else 30)))
+        p.setPen(QPen(col, 2))
+        p.drawEllipse(QPointF(cx, cy), 18, 18)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(col, 1.6))
+        p.drawEllipse(QPointF(cx, cy), 10, 10)
+        p.setBrush(QBrush(col))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QPointF(cx, cy), 3.5, 3.5)
+        p.setPen(QPen(col, 1))
+        p.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        p.drawText(QRectF(0, 50, W, 16), Qt.AlignmentFlag.AlignCenter, "INTERRUPT")
+
+
+class _BottomBar(QWidget):
+    """INTERRUPT + microphone button with the chamfered rail from the reference."""
+
+    def __init__(self, win, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(_BAR_H)
+        self.interrupt = _RoundButton("interrupt", self)
+        self.mic = _RoundButton("mic", self)
+        self.interrupt.clicked.connect(win._do_interrupt)
+        self.mic.clicked.connect(win._toggle_mute)
+
+    def resizeEvent(self, e):
+        cx = self.width() // 2
+        self.mic.setGeometry(cx - 52, 0, 104, _BAR_H)
+        self.interrupt.setGeometry(cx - 146, 16, 80, 72)
+        super().resizeEvent(e)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W = self.width()
+        cx = W / 2
+        p.setPen(QPen(qcol(C.BORDER_B), 1.5))
+        y1, y2 = 66.0, 78.0
+        left = [QPointF(W * 0.06, y1), QPointF(cx - 175, y1),
+                QPointF(cx - 163, y2), QPointF(cx - 118, y2)]
+        right = [QPointF(W * 0.94, y1), QPointF(cx + 175, y1),
+                 QPointF(cx + 163, y2), QPointF(cx + 118, y2)]
+        for pts in (left, right):
+            for a, b in zip(pts, pts[1:]):
+                p.drawLine(a, b)
+        p.end()
+
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -2805,9 +2321,6 @@ class MainWindow(QMainWindow):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
 
-        self._left_panel = self._build_left_panel()
-        body.addWidget(self._left_panel, stretch=0)
-
         # Center column: HUD + resizable content panel via QSplitter
         self.hud = OrbCanvas(face_path, _display)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -2867,13 +2380,21 @@ class MainWindow(QMainWindow):
         self._center_split.setStretchFactor(0, 3)
         self._center_split.setStretchFactor(1, 1)
         self._center_split.setCollapsible(0, False)
-        body.addWidget(self._center_split, stretch=5)
+
+        # centre column = orb (+ optional briefing panel) with the bottom bar under it
+        _col = QWidget()
+        _col_lay = QVBoxLayout(_col)
+        _col_lay.setContentsMargins(0, 0, 0, 0)
+        _col_lay.setSpacing(0)
+        _col_lay.addWidget(self._center_split, 1)
+        self._bottom_bar = _BottomBar(self)
+        _col_lay.addWidget(self._bottom_bar)
+        body.addWidget(_col, stretch=5)
 
         self._right_panel = self._build_right_panel()
         body.addWidget(self._right_panel, stretch=0)
 
         root.addLayout(body, stretch=1)
-        root.addWidget(self._build_footer())
 
         # Quick-access drawer (floating overlay, built after central widget layout is done)
         self._quick_drawer = self._build_quick_drawer()
@@ -2885,12 +2406,6 @@ class MainWindow(QMainWindow):
         self._clock_tmr.timeout.connect(self._tick_clock)
         self._clock_tmr.start(1000)
         self._tick_clock()
-
-        # Metric update timer
-        self._metric_tmr = QTimer(self)
-        self._metric_tmr.timeout.connect(self._update_metrics)
-        self._metric_tmr.start(2000)
-        self._update_metrics()
 
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
@@ -3392,57 +2907,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_quick_drawer') and self._quick_drawer.isVisible():
             self._position_quick_drawer()
 
-    def _update_metrics(self):
-        snap = _metrics.snapshot()
-
-        # CPU
-        cpu = snap["cpu"]
-        self._bar_cpu.set_value(cpu, f"{cpu:.0f}%")
-
-        # MEM
-        mem = snap["mem"]
-        self._bar_mem.set_value(mem, f"{mem:.0f}%")
-
-        # NET
-        net = snap["net"]
-        if net < 1.0:
-            net_str = f"{net*1024:.0f}KB/s"
-        else:
-            net_str = f"{net:.1f}MB/s"
-        net_pct = min(100, net * 10)  # 10 MB/s = %100
-        self._bar_net.set_value(net_pct, net_str)
-
-        # GPU
-        gpu = snap["gpu"]
-        if gpu >= 0:
-            self._bar_gpu.set_value(gpu, f"{gpu:.0f}%")
-        else:
-            self._bar_gpu.set_value(0, "N/A")
-
-        # TMP
-        tmp = snap["tmp"]
-        if tmp >= 0:
-            tmp_pct = min(100, (tmp / 100) * 100)
-            self._bar_tmp.set_value(tmp_pct, f"{tmp:.0f}°C")
-        else:
-            self._bar_tmp.set_value(0, "N/A")
-
-        try:
-            boot_t  = psutil.boot_time()
-            elapsed = time.time() - boot_t
-            h = int(elapsed // 3600)
-            m = int((elapsed % 3600) // 60)
-            self._uptime_lbl.setText(f"UP  {h:02d}:{m:02d}")
-        except Exception:
-            self._uptime_lbl.setText("UP  --:--")
-
-        try:
-            proc_count = len(psutil.pids())
-            self._proc_lbl.setText(f"PROC  {proc_count}")
-        except Exception:
-            self._proc_lbl.setText("PROC  --")
-
-
     def _build_header(self) -> QWidget:
         w = QWidget()
         w.setFixedHeight(54)
@@ -3456,7 +2920,8 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_badge(APP_VERSION, C.PRI_DIM))
+        self._ver_badge = _badge(f"{self._assistant_name.upper()} \u2014 {APP_VERSION}", C.PRI_DIM)
+        lay.addWidget(self._ver_badge)
         lay.addSpacing(8)
         self._drawer_btn = QPushButton("⚙")
         self._drawer_btn.setFixedSize(26, 26)
@@ -3481,7 +2946,9 @@ class MainWindow(QMainWindow):
         self._title_lbl = QLabel(_disp)
         self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._title_lbl.setFont(QFont("Courier New", 17, QFont.Weight.Bold))
-        self._title_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        self._title_lbl.setStyleSheet(
+            f"color: {C.PRI}; background: transparent; "
+            f"border-bottom: 1px solid {C.PRI_DIM}; padding-bottom: 3px;")
         mid.addWidget(self._title_lbl)
         _sub_text = ("Just A Rather Very Intelligent System"
                      if _disp in ("JARVIS", "J.A.R.V.I.S")
@@ -3497,7 +2964,9 @@ class MainWindow(QMainWindow):
         right_col = QVBoxLayout(); right_col.setSpacing(2)
         self._clock_lbl = QLabel("00:00:00")
         self._clock_lbl.setFont(QFont("Courier New", 14, QFont.Weight.Bold))
-        self._clock_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        self._clock_lbl.setStyleSheet(
+            f"color: {C.PRI}; background: transparent; "
+            f"border-bottom: 1px solid {C.PRI_DIM}; padding-bottom: 3px;")
         self._clock_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         right_col.addWidget(self._clock_lbl)
         self._date_lbl = QLabel("")
@@ -3512,150 +2981,47 @@ class MainWindow(QMainWindow):
         self._clock_lbl.setText(time.strftime("%H:%M:%S"))
         self._date_lbl.setText(time.strftime("%a %d %b %Y"))
 
-    def _build_left_panel(self) -> QWidget:
-        w = QWidget()
-        w.setFixedWidth(_LEFT_W)
-        w.setStyleSheet(f"background: {C.DARK}; border-right: 1px solid {C.BORDER};")
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 10, 8, 10)
-        lay.setSpacing(6)
-
-        hdr = QLabel("◈ SYS MONITOR")
-        hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent; "
-                          f"border-bottom: 1px solid {C.BORDER}; padding-bottom: 4px;")
-        lay.addWidget(hdr)
-        lay.addSpacing(2)
-
-        self._bar_cpu = MetricBar("CPU", C.PRI)
-        self._bar_mem = MetricBar("MEM", C.ACC2)
-        self._bar_net = MetricBar("NET", C.GREEN)
-        self._bar_gpu = MetricBar("GPU", C.ACC)
-        self._bar_tmp = MetricBar("TMP", "#ff6688")
-
-        for bar in [self._bar_cpu, self._bar_mem, self._bar_net,
-                    self._bar_gpu, self._bar_tmp]:
-            lay.addWidget(bar)
-
-        lay.addSpacing(4)
-
-        info_panel = QWidget()
-        info_panel.setStyleSheet(
-            f"background: {C.PANEL2}; border: 1px solid {C.BORDER}; border-radius: 4px;"
-        )
-        ip_lay = QVBoxLayout(info_panel)
-        ip_lay.setContentsMargins(6, 5, 6, 5)
-        ip_lay.setSpacing(3)
-
-        self._uptime_lbl = QLabel("UP  --:--")
-        self._uptime_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        self._uptime_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent; border: none;")
-        ip_lay.addWidget(self._uptime_lbl)
-
-        self._proc_lbl = QLabel("PROC  --")
-        self._proc_lbl.setFont(QFont("Courier New", 8))
-        self._proc_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
-        ip_lay.addWidget(self._proc_lbl)
-
-        os_name = {"Windows": "WIN", "Darwin": "macOS", "Linux": "LINUX"}.get(_OS, _OS.upper())
-        os_lbl = QLabel(f"OS  {os_name}")
-        os_lbl.setFont(QFont("Courier New", 8))
-        os_lbl.setStyleSheet(f"color: {C.ACC2}; background: transparent; border: none;")
-        ip_lay.addWidget(os_lbl)
-
-        lay.addWidget(info_panel)
-        lay.addSpacing(4)
-
-        lay.addStretch()
-
-        for txt, col in [
-            ("AI CORE\nACTIVE",  C.GREEN),
-            ("SEC\nCLEARED",     C.PRI),
-            ("PROTOCOL\n" + APP_PROTOCOL,   C.TEXT_DIM),
-        ]:
-            lbl = QLabel(txt)
-            lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet(
-                f"color: {col}; background: {C.PANEL2};"
-                f"border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 4px;"
-            )
-            lay.addWidget(lbl)
-
-        return w
     def _build_right_panel(self) -> QWidget:
         w = QWidget()
         w.setFixedWidth(_RIGHT_W)
-        w.setStyleSheet(f"background: {C.DARK}; border-left: 1px solid {C.BORDER};")
+        w.setStyleSheet(f"background: {C.BG};")
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(6)
+        lay.setContentsMargins(14, 22, 14, 14)
+        lay.setSpacing(8)
 
         def _sec(txt):
-            l = QLabel(f"▸ {txt}")
-            l.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-            l.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+            l = QLabel(f"\u25b6  {txt}")
+            l.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            l.setStyleSheet(f"color: {C.PRI}; background: transparent;")
             return l
 
         lay.addWidget(_sec("ACTIVITY LOG"))
         self._log = LogWidget()
-        self._log.setFixedHeight(90)          # compact system log
+        self._log.setFixedHeight(122)
         lay.addWidget(self._log)
 
+        lay.addSpacing(8)
         lay.addWidget(_sec("LIVE TRANSCRIPT"))
         self._transcript = TranscriptWidget(
             self._assistant_name, you_color=C.WHITE, ai_color=C.PRI,
             bg=C.PANEL, border=C.BORDER)
-        lay.addWidget(self._transcript, stretch=1)
+        lay.addWidget(self._transcript, stretch=0)
+        lay.addStretch(1)
 
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
-        lay.addWidget(sep)
+        # command box: optional, one slim line
+        if SHOW_TEXT_INPUT:
+            lay.addLayout(self._build_input_row())
 
-        lay.addWidget(_sec("FILE UPLOAD"))
+        # Widgets the rest of the class / JarvisUI still reference. They are not
+        # shown (the reference layout has no file zone and the bottom bar owns
+        # interrupt + mute), but keeping them means nothing else had to change.
         self._drop_zone = FileDropZone()
         self._drop_zone.file_selected.connect(self._on_file_selected)
-        lay.addWidget(self._drop_zone)
-
-        self._file_hint = QLabel("No file loaded — drop or click above to upload")
-        self._file_hint.setFont(QFont("Courier New", 7))
-        self._file_hint.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
-        self._file_hint.setWordWrap(True)
-        lay.addWidget(self._file_hint)
-
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
-        lay.addWidget(sep2)
-
-        lay.addWidget(_sec("COMMAND INPUT"))
-        lay.addLayout(self._build_input_row())
-
-        self._interrupt_btn = QPushButton("✋  INTERRUPT  [ESC]")
-        self._interrupt_btn.setFixedHeight(34)
-        self._interrupt_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        self._interrupt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._interrupt_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: #140008; color: {C.MUTED_C};
-                border: 1px solid {C.MUTED_C}; border-radius: 3px;
-            }}
-            QPushButton:hover {{
-                background: #200010; border: 1px solid #ff6688;
-            }}
-            QPushButton:pressed {{
-                background: #300018;
-            }}
-        """)
-        self._interrupt_btn.clicked.connect(self._do_interrupt)
-        lay.addWidget(self._interrupt_btn)
-
-        self._mute_btn = QPushButton("🎙  MICROPHONE ACTIVE")
-        self._mute_btn.setFixedHeight(30)
-        self._mute_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._mute_btn.clicked.connect(self._toggle_mute)
+        self._file_hint = QLabel("")
+        self._mute_btn = QPushButton()
         self._style_mute_btn()
-        lay.addWidget(self._mute_btn)
+        if not SHOW_TEXT_INPUT:
+            self._input.hide()
 
         return w
 
@@ -3823,11 +3189,11 @@ class MainWindow(QMainWindow):
         self._input = QLineEdit()
         self._input.setPlaceholderText("Type a command or question…")
         self._input.setFont(QFont("Courier New", 9))
-        self._input.setFixedHeight(30)
+        self._input.setFixedHeight(32)
         self._input.setStyleSheet(f"""
             QLineEdit {{
-                background: #000d14; color: {C.WHITE};
-                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 7px;
+                background: {C.PANEL}; color: {C.WHITE};
+                border: 1px solid {C.BORDER}; border-radius: 8px; padding: 3px 10px;
             }}
             QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
         """)
@@ -3953,22 +3319,6 @@ class MainWindow(QMainWindow):
         if first_show:
             total = self._center_split.height()
             self._center_split.setSizes([max(total - 220, 120), 220])
-
-    def _build_footer(self) -> QWidget:
-        w = QWidget()
-        w.setFixedHeight(22)
-        w.setStyleSheet(f"background: {C.DARK}; border-top: 1px solid {C.BORDER};")
-        lay = QHBoxLayout(w); lay.setContentsMargins(14, 0, 14, 0)
-
-        def _fl(txt, color=C.TEXT_MED):
-            l = QLabel(txt); l.setFont(QFont("Courier New", 7))
-            l.setStyleSheet(f"color: {color}; background: transparent;")
-            return l
-
-        lay.addWidget(_fl("[F4] Mute  ·  [F11] Fullscreen"))
-        lay.addStretch()
-        lay.addWidget(_fl("By FatihMakes", C.PRI_DIM))
-        return w
 
     def _on_file_selected(self, path: str):
         self._current_file = path
@@ -4286,6 +3636,7 @@ class MainWindow(QMainWindow):
         self._assistant_name = name.strip() or "JARVIS"
         display = self._assistant_name.upper()
         self.setWindowTitle(f"{display} — {APP_VERSION}")
+        self._ver_badge.setText(f"{display} \u2014 {APP_VERSION}")
         self._title_lbl.setText(display)
         if display in ("JARVIS", "J.A.R.V.I.S"):
             self._sub_lbl.setText("Just A Rather Very Intelligent System")
@@ -4463,6 +3814,9 @@ class MainWindow(QMainWindow):
             self._log.append_log("SYS: Microphone active.")
 
     def _style_mute_btn(self):
+        bb = getattr(self, "_bottom_bar", None)
+        if bb is not None:
+            bb.mic.set_muted(self._muted)
         if self._muted:
             self._mute_btn.setText("🔇  MICROPHONE MUTED")
             self._mute_btn.setStyleSheet(f"""
