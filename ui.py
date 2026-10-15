@@ -191,7 +191,8 @@ def qcol(h: str, a: int = 255) -> QColor:
     c = QColor(h); c.setAlpha(a); return c
 
 
-from orb_hud import OrbCanvas, TranscriptWidget
+from orb_hud import OrbCanvas
+from subtitle_hud import TranscriptWidget, RedGlowOrb
 
 
 class LogWidget(QTextEdit):
@@ -2322,7 +2323,7 @@ class MainWindow(QMainWindow):
         body.setSpacing(0)
 
         # Center column: HUD + resizable content panel via QSplitter
-        self.hud = OrbCanvas(face_path, _display)
+        self.hud = RedGlowOrb(face_path, _display)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._content_panel = self._build_content_panel()
 
@@ -3005,8 +3006,7 @@ class MainWindow(QMainWindow):
         self._transcript = TranscriptWidget(
             self._assistant_name, you_color=C.WHITE, ai_color=C.PRI,
             bg=C.PANEL, border=C.BORDER)
-        lay.addWidget(self._transcript, stretch=0)
-        lay.addStretch(1)
+        lay.addWidget(self._transcript, stretch=1)
 
         # command box: optional, one slim line
         if SHOW_TEXT_INPUT:
