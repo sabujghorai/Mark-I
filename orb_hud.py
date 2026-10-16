@@ -31,7 +31,7 @@ _DEPTH = 4                   # depth buckets (back dim/small -> front bright/big
 # Left to right: Red -> Yellow -> Green -> Blue
 _STOPS = [
     (0.0,  (255, 35, 55)),    # Red particles on the far left
-    (0.12, (200, 35, 55)),    # Keep the red section narrow
+    (0.10, (200, 105, 5)),    # Keep the red section narrow
     (0.30, (255, 214, 0)),    # Yellow
     (0.55, (0, 222, 110)),    # Green
     (1.0,  (24, 70, 255)),    # Blue on the right
