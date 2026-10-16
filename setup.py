@@ -29,6 +29,7 @@ def main() -> None:
     _run("Installing Python dependencies (OS-specific extras auto-filtered)…",
          [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
+
     # Chromium covers Chrome/Edge/Opera/Brave/Vivaldi; Firefox for Firefox.
     # (Safari automation additionally needs: python -m playwright install webkit)
     _run("Installing Playwright browsers (chromium + firefox)…",
