@@ -105,7 +105,6 @@ CHUNK_SIZE          = 1024
 _LEVEL_FLOOR = 60.0
 _LEVEL_FULL  = 2600.0
 
-
 def _pcm_level(samples) -> float:
     """Map a block of int16 PCM samples to a 0.0–1.0 loudness level for the HUD
     waveform. Returns 0.0 on empty/invalid input so it can never raise."""
