@@ -27,7 +27,16 @@ _NC = 32                     # colour buckets across the screen (left -> right)
 _DEPTH = 4                   # depth buckets (back dim/small -> front bright/big)
 
 # yellow (left)  ->  green (middle)  ->  blue (right)
-_STOPS = [(0.0, (226, 204, 36)), (0.5, (52, 168, 92)), (1.0, (28, 62, 226))]
+
+# Left to right: Red -> Yellow -> Green -> Blue
+_STOPS = [
+    (0.0,  (255, 35, 55)),    # Red particles on the far left
+    (0.12, (200, 35, 55)),    # Keep the red section narrow
+    (0.30, (255, 214, 0)),    # Yellow
+    (0.55, (0, 222, 110)),    # Green
+    (1.0,  (24, 70, 255)),    # Blue on the right
+]
+
 
 
 def _grad(t: float) -> tuple[int, int, int]:
