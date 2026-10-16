@@ -59,7 +59,7 @@ class TranscriptWidget(QWidget):
 
     def __init__(self, assistant_name: str = "JARVIS", you_color: str = "#d8f8ff",
                  ai_color: str = "#00d4ff", bg: str = "#010d14",
-                 border: str = "#0d3347", parent=None):
+                 border: str = "#121b1f", parent=None):
         super().__init__(parent)
         self._ai_name = assistant_name
         self._you_hex, self._ai_hex = you_color, ai_color
@@ -279,10 +279,6 @@ class RedGlowOrb(OrbCanvas):
 
     def paintEvent(self, e):
         super().paintEvent(e)
-        try:
-            self._paint_red_glow()
-        except Exception:
-            pass
 
     def _paint_red_glow(self) -> None:
         W, H = self.width(), self.height()
