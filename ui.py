@@ -70,8 +70,8 @@ def _read_full_config() -> dict:
 
 
 _DEFAULT_W, _DEFAULT_H = 750, 150
-_MIN_W,     _MIN_H     = 700, 510
-_RIGHT_W = 450
+_MIN_W,     _MIN_H     = 700, 600
+_RIGHT_W = 420
 
 # Small one-line command box under the transcript (not in the reference image,
 # but typing commands is a real feature). Set to False for the exact screenshot.
