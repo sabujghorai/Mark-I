@@ -3639,7 +3639,7 @@ class MainWindow(QMainWindow):
         self._ver_badge.setText(f"{display} \u2014 {APP_VERSION}")
         self._title_lbl.setText(display)
         if display in ("JARVIS", "J.A.R.V.I.S"):
-            self._sub_lbl.setText("Just A Rather Very Intelligent System")
+            self._sub_lbl.setText(".")
         else:
             self._sub_lbl.setText("Personal AI Assistant")
         self._log._ai_name_lc = self._assistant_name.lower()
