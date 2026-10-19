@@ -2951,7 +2951,7 @@ class MainWindow(QMainWindow):
             f"color: {C.PRI}; background: transparent; "
             f"border-bottom: 1px solid {C.PRI_DIM}; padding-bottom: 3px;")
         mid.addWidget(self._title_lbl)
-        _sub_text = ("Just A Rather Very Intelligent System"
+        _sub_text = ("."
                      if _disp in ("JARVIS", "J.A.R.V.I.S")
                      else "Personal AI Assistant")
         self._sub_lbl = QLabel(_sub_text)
