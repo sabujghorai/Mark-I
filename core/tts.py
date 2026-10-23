@@ -426,6 +426,6 @@ def create_tts_player(config: dict) -> TTSPlayer:
         voice_id = config.get("tts_voice", "pNInz6obpgDQGcFmaJgB")
         engine   = ElevenLabsTTSEngine(api_key=api_key, voice_id=voice_id)
     else:   # edgetts (default)
-        voice  = config.get("tts_voice", "en-CA-LiamNeural")
+        voice  = config.get("tts_voice", "en-US-GuyNeural")
         engine = EdgeTTSEngine(voice=voice)
     return TTSPlayer(engine)
