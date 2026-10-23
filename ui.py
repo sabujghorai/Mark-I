@@ -3004,7 +3004,7 @@ class MainWindow(QMainWindow):
         lay.addSpacing(8)
         lay.addWidget(_sec("LIVE TRANSCRIPT"))
         self._transcript = TranscriptWidget(
-            self._assistant_name, you_color=C.WHITE, ai_color=C.PRI,
+            self._assistant_name, you_color=C.RED, ai_color=C.PRI,
             bg=C.PANEL, border=C.BORDER)
         lay.addWidget(self._transcript, stretch=1)
 
