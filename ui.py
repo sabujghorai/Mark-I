@@ -48,7 +48,7 @@ from PyQt6.QtWidgets import (
 # Mark 52 and 53 shipped showing "PROTOCOL XLIX" — the number from Mark 49 — and
 # Mark 55 shipped titled "MARK 54". Deriving the protocol from the name means a
 # release bump is this one line.
-APP_VERSION  = "MARK LIII"
+APP_VERSION  = "MARK I"
 APP_PROTOCOL = APP_VERSION.split()[-1]
 
 def _base_dir() -> Path:
