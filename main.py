@@ -723,7 +723,6 @@ class JarvisLive:
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
-        self._tts_generation = getattr(self, "_tts_generation", 0) + 1
         self._pending_ai.clear()
         self._aud_in = self._aud_out = 0
         q = self.audio_in_queue
@@ -802,14 +801,6 @@ class JarvisLive:
         if mem_str:
             parts.append(mem_str)
         parts.append(sys_prompt)
-        parts.append(
-            "[IMPORTANT: RESPONSE LANGUAGE] Reply in the language of the user's "
-            "latest actual spoken words, not an English-only caption. If the user "
-            "speaks Hindi, respond in natural Hindi using Devanagari. If the user "
-            "speaks Bengali, respond in Bengali script. If the user speaks English, "
-            "respond in English. For any other language, use that language's normal "
-            "script. Never switch languages or translate unless the user asks."
-        )
 
         cfg = dict(
             response_modalities=["AUDIO"],
@@ -1093,76 +1084,6 @@ class JarvisLive:
             print(f"[JARVIS] ❌ Mic: {e}")
             raise
 
-    async def _speak_edge_text(self, text: str, generation: int) -> None:
-        """Speak Gemini's response using Microsoft Edge TTS and MARK's audio queue."""
-        caption_queued = False
-
-        try:
-            if generation != getattr(self, "_tts_generation", generation) or self._interrupted:
-                return
-
-            from core.tts import EdgeTTSEngine
-            import miniaudio
-
-            # One stable male multilingual voice for supported languages.
-            if getattr(self, "_edge_tts_engine", None) is None:
-                self._edge_tts_engine = EdgeTTSEngine(
-                    voice="en-US-AndrewMultilingualNeural",
-                    pitch="-5Hz",
-                    rate="+20%",
-                )
-
-            audio_bytes = await self._edge_tts_engine._synth(text)
-
-            if generation != self._tts_generation or self._interrupted:
-                return
-            if not audio_bytes:
-                raise RuntimeError("Edge TTS returned no audio.")
-
-            decoded = miniaudio.decode(
-                audio_bytes,
-                output_format=miniaudio.SampleFormat.SIGNED16,
-                nchannels=1,
-                sample_rate=RECEIVE_SAMPLE_RATE,
-            )
-            pcm = np.asarray(decoded.samples, dtype=np.int16).tobytes()
-
-            if not pcm:
-                raise RuntimeError("Decoded Edge TTS audio is empty.")
-            if generation != self._tts_generation or self._interrupted:
-                return
-
-            # Match the caption to the amount of Edge audio that will play.
-            end_offset = self._aud_in + len(pcm)
-            caption_future = self._caption_executor.submit(
-                self._english_ai_caption, text
-            )
-            self._pending_ai.append((end_offset, caption_future, text + " "))
-            self._pending_ai.append((end_offset, None, None))
-            caption_queued = True
-            self._aud_in = end_offset
-
-            # Use short PCM chunks so MARK's interrupt handler remains responsive.
-            for start in range(0, len(pcm), 2400):
-                if generation != self._tts_generation or self._interrupted:
-                    return
-                self.audio_in_queue.put_nowait(pcm[start:start + 2400])
-
-            print("[TTS] Speaking with Microsoft Edge: en-CA-LiamNeural")
-
-        except Exception as exc:
-            if generation == getattr(self, "_tts_generation", -1):
-                print(f"[TTS] Edge voice failed: {exc}")
-                self.ui.write_log(f"ERR: Edge TTS failed — {str(exc)[:120]}")
-                if not caption_queued:
-                    self.ui.transcript("ai", text + " ")
-                    self.ui.transcript_end_turn()
-
-        finally:
-            if generation == getattr(self, "_tts_generation", -1):
-                if self._turn_done_event:
-                    self._turn_done_event.set()
-
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
         out_buf, in_buf = [], []
@@ -1185,9 +1106,18 @@ class JarvisLive:
                             self._resume_handle = _sru.new_handle
 
                     if response.data:
-                        # This Gemini Live model requires AUDIO responses.
-                        # Discard Gemini's generated voice; Edge TTS speaks instead.
-                        pass
+                        if self._interrupted:
+                            pass  # discard: interrupted
+                        else:
+                            if self._turn_done_event and self._turn_done_event.is_set():
+                                self._turn_done_event.clear()
+                            # Split into ~50 ms chunks so interrupt() stops audio within 50 ms
+                            # (24000 Hz × 2 bytes/sample × 0.05 s = 2400 bytes per slice)
+                            _audio_data = response.data
+                            _SLICE = 2400
+                            for _i in range(0, len(_audio_data), _SLICE):
+                                self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
+                            self._aud_in += len(_audio_data)
 
                     if response.server_content:
                         sc = response.server_content
@@ -1196,6 +1126,13 @@ class JarvisLive:
                             txt = _clean_transcript(sc.output_transcription.text)
                             if txt and txt != (out_buf[-1] if out_buf else ""):
                                 out_buf.append(txt)
+                                # Translate the visible caption to English in the
+                                # background. The actual JARVIS voice is untouched.
+                                _cap_future = self._caption_executor.submit(
+                                    self._english_ai_caption, txt
+                                )
+                                # Hold it until the matching audio is actually played.
+                                self._pending_ai.append((self._aud_in, _cap_future, txt + " "))
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
@@ -1208,7 +1145,8 @@ class JarvisLive:
                                 self._last_user_speech = time.monotonic()
 
                         if sc.turn_complete:
-                            # Wait until Edge TTS has queued the spoken response.
+                            if self._turn_done_event:
+                                self._turn_done_event.set()
 
                             # If this turn_complete ends an interrupted response, clear the
                             # flag and skip all further processing for that turn.
@@ -1243,19 +1181,7 @@ class JarvisLive:
                                         "ts": datetime.now().isoformat(),
                                     }))
                             out_buf = []
-                            if full_out:
-                                # Invalidate an older pending synthesis job.
-                                self._tts_generation = getattr(self, "_tts_generation", 0) + 1
-                                _generation = self._tts_generation
-                                if self._turn_done_event:
-                                    self._turn_done_event.clear()
-                                asyncio.create_task(
-                                    self._speak_edge_text(full_out, _generation)
-                                )
-                            else:
-                                self._pending_ai.append((self._aud_in, None, None))
-                                if self._turn_done_event:
-                                    self._turn_done_event.set()
+                            self._pending_ai.append((self._aud_in, None, None))   # end of turn, after its audio
 
                             # Vision injection: model finished tool-response turn → now send the image
                             if self._pending_vision and self.session:
