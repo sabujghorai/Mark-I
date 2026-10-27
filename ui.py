@@ -3769,7 +3769,7 @@ class MainWindow(QMainWindow):
         ov.raise_()
         self._plugin_settings_overlay = ov   # keep a reference so it isn't GC'd
 
-    # ── Clipboard intelligence ───────────────────────────────────────────────────
+    # ── Clipboard intelligence
 
     def _on_clipboard_changed(self):
         try:
